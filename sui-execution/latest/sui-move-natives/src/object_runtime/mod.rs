@@ -779,7 +779,8 @@ impl ObjectRuntimeState {
                 // In any case, if it was not changed, it should not be marked as modified
                 debug_assert!(loaded_child_objects
                     .get(&child)
-                    .is_none_or(|loaded_child| !loaded_child.is_modified));
+                    .map(|loaded_child| !loaded_child.is_modified())
+                    .unwrap_or(true);
             }
         }
     }
