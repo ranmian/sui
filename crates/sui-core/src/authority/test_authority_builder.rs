@@ -424,6 +424,7 @@ impl<'a> TestAuthorityBuilder<'a> {
             policy_config,
             firewall_config,
             Arc::new(PrunerWatermarks::default()),
+            None,
         )
         .await;
 

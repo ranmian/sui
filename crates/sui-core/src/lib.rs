@@ -5,6 +5,7 @@
 extern crate core;
 
 pub mod accumulators;
+pub mod arb_object_feed;
 pub mod authority;
 pub mod authority_aggregator;
 pub mod authority_client;

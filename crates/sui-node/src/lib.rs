@@ -158,6 +158,7 @@ use typed_store::rocks::default_db_options;
 use crate::metrics::{GrpcMetrics, SuiNodeMetrics};
 
 pub mod admin;
+mod arb_object_feed;
 mod handle;
 pub mod metrics;
 
@@ -748,6 +749,7 @@ impl SuiNode {
         }
 
         let authority_name = config.protocol_public_key();
+        let arb_object_feed = arb_object_feed::build_arb_object_feed(config.arb_object_feed())?;
 
         info!("create authority state");
         let state = AuthorityState::new(
@@ -769,6 +771,7 @@ impl SuiNode {
             config.policy_config.clone(),
             config.firewall_config.clone(),
             pruner_watermarks,
+            arb_object_feed,
         )
         .await;
         // ensure genesis txn was executed

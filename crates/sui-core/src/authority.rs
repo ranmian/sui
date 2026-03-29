@@ -7,6 +7,7 @@ use crate::accumulators::funds_read::AccountFundsRead;
 use crate::accumulators::object_funds_checker::ObjectFundsChecker;
 use crate::accumulators::object_funds_checker::metrics::ObjectFundsCheckerMetrics;
 use crate::accumulators::{self, AccumulatorSettlementTxBuilder};
+use crate::arb_object_feed::{ArbObjectFeed, ArbTxObjectBatch};
 use crate::checkpoints::CheckpointBuilderError;
 use crate::checkpoints::CheckpointBuilderResult;
 use crate::congestion_tracker::CongestionTracker;
@@ -134,7 +135,7 @@ use sui_types::effects::{
 };
 use sui_types::error::{ExecutionError, SuiErrorKind, UserInputError};
 use sui_types::event::{Event, EventID};
-use sui_types::executable_transaction::VerifiedExecutableTransaction;
+use sui_types::executable_transaction::{CertificateProof, VerifiedExecutableTransaction};
 use sui_types::execution_status::ExecutionErrorKind;
 use sui_types::gas::{GasCostSummary, SuiGasStatus};
 use sui_types::inner_temporary_store::{
@@ -900,6 +901,7 @@ pub struct AuthorityState {
     pub rpc_index: Option<Arc<RpcIndexStore>>,
 
     pub subscription_handler: Arc<SubscriptionHandler>,
+    arb_object_feed: Option<Arc<dyn ArbObjectFeed>>,
     pub checkpoint_store: Arc<CheckpointStore>,
 
     committee_store: Arc<CommitteeStore>,
@@ -2082,6 +2084,8 @@ impl AuthorityState {
                 fork_probability,
             );
         });
+
+        self.publish_arb_object_feed(certificate, tx_digest, &inner_temp_store.written);
 
         let unchanged_loaded_runtime_objects =
             crate::transaction_outputs::unchanged_loaded_runtime_objects(
@@ -3443,6 +3447,30 @@ impl AuthorityState {
         Ok((raw_batch, cache_updates))
     }
 
+    fn publish_arb_object_feed(
+        &self,
+        certificate: &VerifiedExecutableTransaction,
+        tx_digest: TransactionDigest,
+        written: &WrittenObjects,
+    ) {
+        let Some(feed) = &self.arb_object_feed else {
+            return;
+        };
+
+        let checkpoint_seq = match certificate.auth_sig() {
+            CertificateProof::Checkpoint(_, seq) => Some(*seq),
+            _ => None,
+        };
+
+        let Some(batch) =
+            ArbTxObjectBatch::from_written_objects(checkpoint_seq, tx_digest, written)
+        else {
+            return;
+        };
+
+        feed.try_publish(batch);
+    }
+
     fn make_transaction_block_events(
         backing_package_store: &Arc<dyn BackingPackageStore + Send + Sync>,
         transaction_events: TransactionEvents,
@@ -3659,6 +3687,7 @@ impl AuthorityState {
         policy_config: Option<PolicyConfig>,
         firewall_config: Option<RemoteFirewallConfig>,
         pruner_watermarks: Arc<PrunerWatermarks>,
+        arb_object_feed: Option<Arc<dyn ArbObjectFeed>>,
     ) -> Arc<Self> {
         Self::check_protocol_version(supported_protocol_versions, epoch_store.protocol_version());
 
@@ -3733,6 +3762,7 @@ impl AuthorityState {
             indexes,
             rpc_index,
             subscription_handler: Arc::new(SubscriptionHandler::new(prometheus_registry)),
+            arb_object_feed,
             checkpoint_store,
             committee_store,
             execution_scheduler,

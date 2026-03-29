@@ -76,6 +76,9 @@ pub struct NodeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rpc: Option<crate::RpcConfig>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arb_object_feed: Option<ArbObjectFeedConfig>,
+
     #[serde(default = "default_metrics_address")]
     pub metrics_address: SocketAddr,
     #[serde(default = "default_admin_interface_port")]
@@ -924,6 +927,23 @@ impl NodeConfig {
     pub fn rpc(&self) -> Option<&crate::RpcConfig> {
         self.rpc.as_ref()
     }
+
+    pub fn arb_object_feed(&self) -> Option<&ArbObjectFeedConfig> {
+        self.arb_object_feed.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ArbObjectFeedConfig {
+    pub socket_path: PathBuf,
+
+    #[serde(default = "default_arb_object_feed_channel_capacity")]
+    pub channel_capacity: usize,
+}
+
+fn default_arb_object_feed_channel_capacity() -> usize {
+    8192
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

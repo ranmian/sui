@@ -229,6 +229,7 @@ impl ValidatorConfigBuilder {
             json_rpc_address: local_ip_utils::new_tcp_address_for_testing(&localhost)
                 .to_socket_addr()
                 .unwrap(),
+            arb_object_feed: None,
             consensus_config: Some(consensus_config),
             remove_deprecated_tables: false,
             enable_index_processing: default_enable_index_processing(),
@@ -574,6 +575,7 @@ impl FullnodeConfigBuilder {
                 .admin_interface_port
                 .unwrap_or(local_ip_utils::get_available_port(&localhost)),
             json_rpc_address: self.json_rpc_address.unwrap_or(json_rpc_address),
+            arb_object_feed: None,
             consensus_config: None,
             remove_deprecated_tables: false,
             enable_index_processing: default_enable_index_processing(),
