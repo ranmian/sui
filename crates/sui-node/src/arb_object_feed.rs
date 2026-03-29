@@ -9,8 +9,6 @@ use sui_core::arb_object_feed::{ArbObjectDatagram, ArbObjectFeed, ArbTxObjectBat
 #[cfg(unix)]
 use tokio::net::UnixDatagram;
 #[cfg(unix)]
-use tokio::sync::mpsc;
-#[cfg(unix)]
 use tracing::{debug, info, warn};
 
 #[cfg(not(unix))]
@@ -38,7 +36,8 @@ pub(crate) fn build_arb_object_feed(
 }
 
 struct UdsArbObjectFeed {
-    sender: mpsc::Sender<ArbTxObjectBatch>,
+    socket: UnixDatagram,
+    socket_path: PathBuf,
 }
 
 #[cfg(unix)]
@@ -46,11 +45,7 @@ impl UdsArbObjectFeed {
     fn start(config: ArbObjectFeedConfig) -> Result<Arc<Self>> {
         ensure_socket_parent_dir(&config.socket_path)?;
         let socket = UnixDatagram::unbound().context("failed to create arb object feed socket")?;
-
-        let (sender, receiver) = mpsc::channel(config.channel_capacity);
         let socket_path = config.socket_path.clone();
-
-        tokio::spawn(Self::write_loop(receiver, socket, socket_path.clone()));
 
         info!(
             destination_socket_path = %socket_path.display(),
@@ -58,41 +53,18 @@ impl UdsArbObjectFeed {
             "started arb object feed datagram sender"
         );
 
-        Ok(Arc::new(Self { sender }))
-    }
-
-    async fn write_loop(
-        mut receiver: mpsc::Receiver<ArbTxObjectBatch>,
-        socket: UnixDatagram,
-        socket_path: PathBuf,
-    ) {
-        while let Some(batch) = receiver.recv().await {
-            for datagram in batch.into_datagrams() {
-                send_datagram(&socket, &socket_path, datagram);
-            }
-        }
+        Ok(Arc::new(Self {
+            socket,
+            socket_path,
+        }))
     }
 }
 
 #[cfg(unix)]
 impl ArbObjectFeed for UdsArbObjectFeed {
     fn try_publish(&self, batch: ArbTxObjectBatch) {
-        match self.sender.try_send(batch) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(batch)) => {
-                warn!(
-                    tx_digest = ?batch.tx_digest,
-                    object_count = batch.objects.len(),
-                    "arb object feed queue is full; dropping batch"
-                );
-            }
-            Err(mpsc::error::TrySendError::Closed(batch)) => {
-                warn!(
-                    tx_digest = ?batch.tx_digest,
-                    object_count = batch.objects.len(),
-                    "arb object feed queue is closed; dropping batch"
-                );
-            }
+        for datagram in batch.into_datagrams() {
+            send_datagram(&self.socket, &self.socket_path, datagram);
         }
     }
 }
