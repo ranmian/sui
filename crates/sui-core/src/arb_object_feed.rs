@@ -42,6 +42,13 @@ pub struct ArbTxObjectBatch {
     pub objects: Vec<ArbObjectUpdate>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArbObjectDatagram {
+    pub checkpoint_seq: Option<CheckpointSequenceNumber>,
+    pub tx_digest: TransactionDigest,
+    pub object: ArbObjectUpdate,
+}
+
 impl ArbTxObjectBatch {
     pub fn from_written_objects(
         checkpoint_seq: Option<CheckpointSequenceNumber>,
@@ -58,6 +65,19 @@ impl ArbTxObjectBatch {
             tx_digest,
             objects,
         })
+    }
+
+    pub fn into_datagrams(self) -> impl Iterator<Item = ArbObjectDatagram> {
+        let checkpoint_seq = self.checkpoint_seq;
+        let tx_digest = self.tx_digest;
+
+        self.objects
+            .into_iter()
+            .map(move |object| ArbObjectDatagram {
+                checkpoint_seq,
+                tx_digest: tx_digest.clone(),
+                object,
+            })
     }
 }
 

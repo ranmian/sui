@@ -1,19 +1,17 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use sui_config::ArbObjectFeedConfig;
-use sui_core::arb_object_feed::{ArbObjectFeed, ArbTxObjectBatch};
+use sui_core::arb_object_feed::{ArbObjectDatagram, ArbObjectFeed, ArbTxObjectBatch};
 #[cfg(unix)]
-use tokio::io::AsyncWriteExt;
+use tokio::net::UnixDatagram;
 #[cfg(unix)]
-use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
 #[cfg(unix)]
-use tokio::sync::{Mutex, mpsc};
-#[cfg(unix)]
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(not(unix))]
 pub(crate) fn build_arb_object_feed(
@@ -46,103 +44,31 @@ struct UdsArbObjectFeed {
 #[cfg(unix)]
 impl UdsArbObjectFeed {
     fn start(config: ArbObjectFeedConfig) -> Result<Arc<Self>> {
-        prepare_socket_path(&config.socket_path)?;
-
-        let listener = UnixListener::bind(&config.socket_path).with_context(|| {
-            format!(
-                "failed to bind arb object feed socket at {}",
-                config.socket_path.display()
-            )
-        })?;
+        ensure_socket_parent_dir(&config.socket_path)?;
+        let socket = UnixDatagram::unbound().context("failed to create arb object feed socket")?;
 
         let (sender, receiver) = mpsc::channel(config.channel_capacity);
-        let current_stream = Arc::new(Mutex::new(None));
         let socket_path = config.socket_path.clone();
 
-        tokio::spawn(Self::accept_loop(
-            listener,
-            Arc::clone(&current_stream),
-            socket_path.clone(),
-        ));
-        tokio::spawn(Self::write_loop(
-            receiver,
-            current_stream,
-            socket_path.clone(),
-        ));
+        tokio::spawn(Self::write_loop(receiver, socket, socket_path.clone()));
 
         info!(
-            socket_path = %socket_path.display(),
+            destination_socket_path = %socket_path.display(),
             channel_capacity = config.channel_capacity,
-            "started arb object feed socket"
+            "started arb object feed datagram sender"
         );
 
         Ok(Arc::new(Self { sender }))
     }
 
-    async fn accept_loop(
-        listener: UnixListener,
-        current_stream: Arc<Mutex<Option<UnixStream>>>,
-        socket_path: PathBuf,
-    ) {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    *current_stream.lock().await = Some(stream);
-                    info!(
-                        socket_path = %socket_path.display(),
-                        "arb object feed client connected"
-                    );
-                }
-                Err(error) => {
-                    warn!(
-                        socket_path = %socket_path.display(),
-                        ?error,
-                        "arb object feed accept failed"
-                    );
-                }
-            }
-        }
-    }
-
     async fn write_loop(
         mut receiver: mpsc::Receiver<ArbTxObjectBatch>,
-        current_stream: Arc<Mutex<Option<UnixStream>>>,
+        socket: UnixDatagram,
         socket_path: PathBuf,
     ) {
         while let Some(batch) = receiver.recv().await {
-            let payload = match bcs::to_bytes(&batch) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    warn!(tx_digest = ?batch.tx_digest, ?error, "failed to serialize arb object batch");
-                    continue;
-                }
-            };
-
-            let payload_len = match u32::try_from(payload.len()) {
-                Ok(len) => len.to_be_bytes(),
-                Err(_) => {
-                    warn!(
-                        tx_digest = ?batch.tx_digest,
-                        payload_size = payload.len(),
-                        "arb object batch is too large to frame"
-                    );
-                    continue;
-                }
-            };
-
-            let mut guard = current_stream.lock().await;
-            let Some(stream) = guard.as_mut() else {
-                continue;
-            };
-
-            if let Err(error) = write_frame(stream, &payload_len, &payload).await {
-                warn!(
-                    socket_path = %socket_path.display(),
-                    tx_digest = ?batch.tx_digest,
-                    ?error,
-                    "arb object feed client write failed"
-                );
-                *guard = None;
+            for datagram in batch.into_datagrams() {
+                send_datagram(&socket, &socket_path, datagram);
             }
         }
     }
@@ -172,21 +98,7 @@ impl ArbObjectFeed for UdsArbObjectFeed {
 }
 
 #[cfg(unix)]
-async fn write_frame(
-    stream: &mut UnixStream,
-    length: &[u8; 4],
-    payload: &[u8],
-) -> std::io::Result<()> {
-    stream.write_all(length).await?;
-    stream.write_all(payload).await?;
-    stream.flush().await
-}
-
-#[cfg(unix)]
-fn prepare_socket_path(path: &Path) -> Result<()> {
-    use std::io::ErrorKind;
-    use std::os::unix::fs::FileTypeExt;
-
+fn ensure_socket_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -196,31 +108,60 @@ fn prepare_socket_path(path: &Path) -> Result<()> {
         })?;
     }
 
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
-            std::fs::remove_file(path).with_context(|| {
-                format!(
-                    "failed to remove stale arb object feed socket {}",
-                    path.display()
-                )
-            })?;
-        }
-        Ok(_) => {
-            return Err(anyhow!(
-                "arb object feed path {} exists and is not a unix socket",
-                path.display()
-            ));
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
+    Ok(())
+}
+
+#[cfg(unix)]
+fn send_datagram(socket: &UnixDatagram, socket_path: &Path, datagram: ArbObjectDatagram) {
+    let payload = match bcs::to_bytes(&datagram) {
+        Ok(payload) => payload,
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to inspect arb object feed socket path {}",
-                    path.display()
-                )
-            });
+            warn!(
+                tx_digest = ?datagram.tx_digest,
+                object_id = %datagram.object.object_id,
+                ?error,
+                "failed to serialize arb object datagram"
+            );
+            return;
+        }
+    };
+
+    match socket.try_send_to(&payload, socket_path) {
+        Ok(sent) if sent == payload.len() => {}
+        Ok(sent) => {
+            warn!(
+                destination_socket_path = %socket_path.display(),
+                tx_digest = ?datagram.tx_digest,
+                object_id = %datagram.object.object_id,
+                sent_bytes = sent,
+                payload_size = payload.len(),
+                "arb object datagram was only partially sent; dropping remainder"
+            );
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            debug!(
+                destination_socket_path = %socket_path.display(),
+                tx_digest = ?datagram.tx_digest,
+                object_id = %datagram.object.object_id,
+                ?error,
+                "arb object datagram dropped"
+            );
+        }
+        Err(error) => {
+            warn!(
+                destination_socket_path = %socket_path.display(),
+                tx_digest = ?datagram.tx_digest,
+                object_id = %datagram.object.object_id,
+                ?error,
+                "arb object datagram send failed"
+            );
         }
     }
-
-    Ok(())
 }
