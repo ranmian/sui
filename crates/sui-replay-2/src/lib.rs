@@ -32,6 +32,7 @@ use ::tracing::{Instrument, debug, error, info_span, warn};
 pub mod artifacts;
 pub mod displays;
 pub mod execution;
+pub mod local_replay;
 pub mod package_tools;
 pub mod replay_txn;
 pub mod summary_metrics;
