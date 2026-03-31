@@ -13,6 +13,7 @@
 
 # Rust build directory
 **/target
+**/target-codex
 .pre-commit*
 
 # Move build directory
